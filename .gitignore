@@ -1,0 +1,3 @@
+*.bin
+*.safetensors
+pytorch_model.bin
