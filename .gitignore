@@ -1,3 +1,11 @@
 *.bin
 *.safetensors
 pytorch_model.bin
+**/checkpoints/
+**/logs/
+**/outputs/
+**/datasets/
+**/_pycache__/
+**/*.csv
+*.out
+*.log
