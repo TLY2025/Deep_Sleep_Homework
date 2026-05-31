@@ -1,0 +1,12 @@
+# 核心依赖
+torch>=2.0.0
+transformers>=4.35.0
+peft>=0.6.0
+
+# 数据处理与Excel
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# 其他工具
+tqdm>=4.66.0
+scikit-learn>=1.2.0
