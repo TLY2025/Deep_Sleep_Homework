@@ -22,9 +22,11 @@ pip install -r requirements.txt
 │   ├── checkpoints/        # 模型权重保存路径（文件未上传）
 │   └── README.md           # 脚本使用说明
 
-└── datasets/               # 数据集存放目录
+├── datasets/               # 数据集存放目录
     ├── merged_dataset.csv  # 训练数据集
     └── ...                 # 其他数据集
+
+└── comparing solutions     # 其他方案
 
 ```
 
