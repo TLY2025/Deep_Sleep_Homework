@@ -23,7 +23,7 @@ pip install -r requirements.txt
 │   └── README.md           # 脚本使用说明
 
 ├── datasets/               # 数据集存放目录
-    ├── merged_dataset.csv  # 训练数据集
+    ├── train/merged_dataset.csv  # 训练数据集
     └── ...                 # 其他数据集
 
 └── comparing solutions     # 其他方案
