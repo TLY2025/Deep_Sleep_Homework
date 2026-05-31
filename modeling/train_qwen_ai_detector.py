@@ -394,7 +394,38 @@ def make_collate(tokenizer, max_len: int):
     return collate_fn
 
 
-def compute_metrics(gold: List[int], pred_human: List[int]) -> Dict[str, float]:
+def compute_binary_auc(gold: List[int], scores: List[float]) -> float:
+    """ROC-AUC for binary labels. Higher score should indicate positive class (gold=1)."""
+    n = len(gold)
+    if n == 0:
+        return float("nan")
+
+    order = sorted(range(n), key=lambda i: scores[i])
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and scores[order[j + 1]] == scores[order[i]]:
+            j += 1
+        avg_rank = (i + j + 2) / 2.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg_rank
+        i = j + 1
+
+    n_pos = sum(int(g == 1) for g in gold)
+    n_neg = n - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+
+    sum_ranks_pos = sum(ranks[i] for i in range(n) if gold[i] == 1)
+    return (sum_ranks_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def compute_metrics(
+    gold: List[int],
+    pred_human: List[int],
+    prob_human: Optional[List[float]] = None,
+) -> Dict[str, float]:
     total = max(len(gold), 1)
     acc = sum(int(g == p) for g, p in zip(gold, pred_human)) / total
 
@@ -416,7 +447,7 @@ def compute_metrics(gold: List[int], pred_human: List[int]) -> Dict[str, float]:
     rec_ai = tp_ai / (tp_ai + fn_ai + 1e-12)
     f1_ai = 2 * prec_ai * rec_ai / (prec_ai + rec_ai + 1e-12)
 
-    return {
+    metrics = {
         "accuracy": acc,
         "precision_human": prec_h,
         "recall_human": rec_h,
@@ -425,12 +456,19 @@ def compute_metrics(gold: List[int], pred_human: List[int]) -> Dict[str, float]:
         "recall_ai": rec_ai,
         "f1_ai": f1_ai,
     }
+    if prob_human is not None:
+        prob_ai = [1.0 - p for p in prob_human]
+        gold_ai = [1 - g for g in gold]
+        metrics["auc_human"] = compute_binary_auc(gold, prob_human)
+        metrics["auc_ai"] = compute_binary_auc(gold_ai, prob_ai)
+    return metrics
 
 
 def evaluate(model: QwenAIDetector, dataloader: DataLoader, device: torch.device, human_threshold: float) -> Dict[str, float]:
     model.eval()
     all_gold: List[int] = []
     all_pred_human: List[int] = []
+    all_prob_human: List[float] = []
     loss_sum = 0.0
     steps = 0
     with torch.no_grad():
@@ -447,11 +485,62 @@ def evaluate(model: QwenAIDetector, dataloader: DataLoader, device: torch.device
             pred_h = (probs_human >= human_threshold).long()
             all_gold.extend(labels.long().cpu().tolist())
             all_pred_human.extend(pred_h.cpu().tolist())
+            all_prob_human.extend(probs_human.view(-1).cpu().tolist())
             loss_sum += float(out["loss"].item())
             steps += 1
-    metrics = compute_metrics(all_gold, all_pred_human)
+    metrics = compute_metrics(all_gold, all_pred_human, prob_human=all_prob_human)
     metrics["loss"] = loss_sum / max(steps, 1)
     return metrics
+
+
+def format_metrics(prefix: str, metrics: Dict[str, float]) -> str:
+    auc_human = metrics.get("auc_human", float("nan"))
+    auc_ai = metrics.get("auc_ai", float("nan"))
+    return (
+        f"{prefix}_loss={metrics['loss']:.4f} {prefix}_acc={metrics['accuracy']:.4f} "
+        f"{prefix}_f1_ai={metrics['f1_ai']:.4f} {prefix}_f1_human={metrics['f1_human']:.4f} "
+        f"{prefix}_auc_human={auc_human:.4f} {prefix}_auc_ai={auc_ai:.4f}"
+    )
+
+
+def build_eval_loaders(args, tokenizer):
+    valid_in_loader = None
+    valid_ext_loader = None
+    valid_in_samples: List[Sample] = []
+    valid_ext_samples: List[Sample] = []
+
+    if args.train_csv:
+        all_train_rows = read_rows(args.train_csv)
+        _, valid_in_rows = split_rows(all_train_rows, args.val_ratio, args.seed)
+        valid_in_samples = build_samples(
+            valid_in_rows,
+            single_from_answer_ratio=1.0 if args.eval_with_single_augment else 0.0,
+        )
+        if valid_in_samples:
+            valid_in_loader = DataLoader(
+                AIDataset(valid_in_samples),
+                batch_size=args.batch_size,
+                shuffle=False,
+                collate_fn=make_collate(tokenizer, args.max_len),
+            )
+
+    if args.valid_csv:
+        valid_ext_rows = read_rows(args.valid_csv)
+        valid_ext_samples = build_samples(
+            valid_ext_rows,
+            single_from_answer_ratio=1.0 if args.eval_with_single_augment else 0.0,
+        )
+        if valid_ext_samples:
+            valid_ext_loader = DataLoader(
+                AIDataset(valid_ext_samples),
+                batch_size=args.batch_size,
+                shuffle=False,
+                collate_fn=make_collate(tokenizer, args.max_len),
+            )
+
+    if valid_in_loader is None and valid_ext_loader is None:
+        raise ValueError("Provide --train_csv and/or --valid_csv for evaluation.")
+    return valid_in_loader, valid_ext_loader, valid_in_samples, valid_ext_samples
 
 
 def train_main(args) -> None:
@@ -562,15 +651,10 @@ def train_main(args) -> None:
 
         print(
             f"[epoch={epoch}] train_loss={train_loss:.4f} "
-            f"val_in_loss={metrics_in['loss']:.4f} val_in_acc={metrics_in['accuracy']:.4f} "
-            f"val_in_f1_ai={metrics_in['f1_ai']:.4f} val_in_f1_human={metrics_in['f1_human']:.4f}"
+            + format_metrics("val_in", metrics_in)
         )
         if metrics_ext is not None:
-            print(
-                f"[epoch={epoch}] "
-                f"val_ext_loss={metrics_ext['loss']:.4f} val_ext_acc={metrics_ext['accuracy']:.4f} "
-                f"val_ext_f1_ai={metrics_ext['f1_ai']:.4f} val_ext_f1_human={metrics_ext['f1_human']:.4f}"
-            )
+            print(f"[epoch={epoch}] " + format_metrics("val_ext", metrics_ext))
 
         if score > best_score:
             best_score = score
@@ -596,6 +680,43 @@ def train_main(args) -> None:
         json.dump(vars(args), f, ensure_ascii=False, indent=2)
     print(f"Best checkpoint: {best_ckpt_path}")
     print(f"Best score: {best_score:.4f}")
+
+
+def eval_main(args) -> None:
+    device = pick_device(args.gpu)
+    model, tokenizer, ckpt = load_model_for_infer(args.checkpoint, device)
+    if args.dtype == "float32":
+        model.float()
+    elif args.dtype == "float16":
+        model.half()
+    elif args.dtype == "bfloat16":
+        model.bfloat16()
+    else:
+        raise ValueError(f"Unsupported dtype: {args.dtype}")
+    model.to(device)
+    max_len = args.max_len if args.max_len > 0 else int(ckpt.get("max_len", 512))
+    threshold = args.human_threshold if args.human_threshold is not None else float(ckpt.get("human_threshold", 0.5))
+
+    valid_in_loader, valid_ext_loader, valid_in_samples, valid_ext_samples = build_eval_loaders(args, tokenizer)
+    print(
+        f"Eval checkpoint: {args.checkpoint}\n"
+        f"samples: val_in={len(valid_in_samples)}, val_ext={len(valid_ext_samples)}, "
+        f"threshold={threshold:.4f}, max_len={max_len}"
+    )
+
+    results: Dict[str, Dict[str, float]] = {}
+    if valid_in_loader is not None:
+        results["val_in"] = evaluate(model, valid_in_loader, device, threshold)
+        print(format_metrics("val_in", results["val_in"]))
+    if valid_ext_loader is not None:
+        results["val_ext"] = evaluate(model, valid_ext_loader, device, threshold)
+        print(format_metrics("val_ext", results["val_ext"]))
+
+    if args.output_json:
+        os.makedirs(os.path.dirname(args.output_json) or ".", exist_ok=True)
+        with open(args.output_json, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"Saved metrics to: {args.output_json}")
 
 
 def load_model_for_infer(checkpoint: str, device: torch.device):
@@ -806,6 +927,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_pred_text.add_argument("--human_threshold", type=float, default=None)
     p_pred_text.add_argument("--gpu", type=str, default="")
 
+    p_eval = sub.add_parser("eval", help="Evaluate a pretrained checkpoint on validation csv(s) with AUC.")
+    p_eval.add_argument("--checkpoint", type=str, required=True)
+    p_eval.add_argument("--train_csv", type=str, default="", help="Train csv; split val_ratio as internal validation.")
+    p_eval.add_argument("--valid_csv", type=str, default="", help="External validation csv.")
+    p_eval.add_argument("--val_ratio", type=float, default=0.1)
+    p_eval.add_argument("--eval_with_single_augment", action=argparse.BooleanOptionalAction, default=False)
+    p_eval.add_argument("--max_len", type=int, default=0)
+    p_eval.add_argument("--batch_size", type=int, default=32)
+    p_eval.add_argument("--human_threshold", type=float, default=None)
+    p_eval.add_argument("--seed", type=int, default=42)
+    p_eval.add_argument("--gpu", type=str, default="")
+    p_eval.add_argument("--output_json", type=str, default="")
+    p_eval.add_argument("--dtype", type=str, default="float32")
+
     p_train.add_argument("--use_lora", action=argparse.BooleanOptionalAction, default=False)
     p_train.add_argument("--lora_r", type=int, default=8)
     p_train.add_argument("--lora_alpha", type=int, default=16)
@@ -833,6 +968,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.cmd == "train":
         train_main(args)
+    elif args.cmd == "eval":
+        eval_main(args)
     elif args.cmd == "predict_csv":
         predict_csv_main(args)
     elif args.cmd == "predict_text":
@@ -896,4 +1033,13 @@ nohup python modeling/train_qwen_ai_detector.py predict_csv \
     --human_threshold 0.5 \
     --dtype bfloat16 \
     --gpu 5  > /mnt/jfzn/zjh/playground/Deep_Sleep_Homework/logs/qwen_ai_detector_lora_predict.log 2>&1 &
+
+nohup python modeling/train_qwen_ai_detector.py eval \
+  --checkpoint /mnt/jfzn/zjh/playground/Deep_Sleep_Homework/checkpoints/qwen_ai_detector_lora/epoch_1_qwen_ai_detector.pt \
+  --valid_csv /mnt/jfzn/zjh/playground/Deep_Sleep_Homework/datasets/val/UCAS_AISAD_TEXT-val.csv \
+  --max_len 2048 \
+  --batch_size 32 \
+  --gpu 6 \
+  --dtype bfloat16 \
+  --output_json /mnt/jfzn/zjh/playground/Deep_Sleep_Homework/logs/qwen_ai_detector_eval_metrics.json > /mnt/jfzn/zjh/playground/Deep_Sleep_Homework/logs/qwen_ai_detector_lora_predict_auc.log 2>&1 &
 """
