@@ -36,7 +36,7 @@ pip install -r requirements.txt
 
 由于模型文件较大，未上传至GitHub。请从以下链接下载预训练模型权重：
 
-**模型下载链接**: [https://modelscope.cn/models/FAndromedA/qwen_0.6B_ai_detector/summary]
+[上传至Modelscope平台的预训练模型](https://modelscope.cn/models/FAndromedA/qwen_0.6B_ai_detector/summary)
 
 下载后，将模型文件（例如 `best_qwen_ai_detector.pt`）放入 `./modeling/checkpoints/` 目录。
 
