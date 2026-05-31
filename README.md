@@ -53,4 +53,3 @@ python modeling/train_qwen_ai_detector.py predict_csv \
 ### 3. 提交结果
 
 将生成的 `[你的队伍名].xlsx` 文件提交给老师。
-```
