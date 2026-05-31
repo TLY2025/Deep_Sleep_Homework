@@ -43,3 +43,8 @@ print(f"模型加载：{load_time:.2f}s")
 print(f"第一次推理（热身）：{time1:.4f}s")
 print(f"第二次推理（真实速度）：{time2:.4f}s")
 print("="*60)
+
+# acc 1. 1-0.1398 
+# acc 2. 1-0.0378
+# acc 3. 1-0.16
+# acc 4. 1-0.0259
